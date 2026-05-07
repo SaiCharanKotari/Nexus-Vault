@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
     Play,
     Settings,
@@ -7,8 +7,10 @@ import {
     ThumbsUp,
     Volume2,
     VolumeX,
-    Maximize
+    Maximize,
+    Loader2,
 } from 'lucide-react';
+import { fetchRequirements, type ParsedRequirements } from './requirementsService';
 
 interface GameDetailsProps {
     game: any;
@@ -19,29 +21,81 @@ interface GameDetailsProps {
 export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, accentColor }) => {
     const [activeMediaIndex, setActiveMediaIndex] = useState(0);
     const [isMuted, setIsMuted] = useState(true);
+    const [requirements, setRequirements] = useState<ParsedRequirements | null>(null);
+    const [reqLoading, setReqLoading] = useState(true);
+    const [videoError, setVideoError] = useState<string | null>(null);
+    const thumbnailRef = useRef<HTMLDivElement>(null);
 
-    // Combine movies and screenshots into a single media list
-    const mediaList = [
-        ...(game.movies || []).map((m: any) => ({ type: 'video', url: m.url, thumb: m.thumbnail, name: m.name })),
-        ...game.screenshots.map((url: string) => ({ type: 'image', url }))
-    ];
+    const scrollThumbnails = (dir: 'left' | 'right') => {
+        if (thumbnailRef.current) {
+            thumbnailRef.current.scrollBy({ left: dir === 'left' ? -800 : 800, behavior: 'smooth' });
+        }
+    };
+
+    // Filter live movies to ensure they have at least one valid source
+    const liveMovies = React.useMemo(() =>
+        requirements?.movies?.filter(m => m.mp4 || m.webm) || [],
+        [requirements?.movies]
+    );
+
+    const movies = React.useMemo(() => (liveMovies.length > 0)
+        ? liveMovies
+        : (game.movies || []), [liveMovies, game.movies]);
+
+    const screenshots = React.useMemo(() => (requirements?.screenshots && requirements.screenshots.length > 0)
+        ? requirements.screenshots
+        : (game.screenshots || []), [requirements, game.screenshots]);
+
+    const mediaList = React.useMemo(() => [
+        ...movies.map((m: any) => ({
+            type: 'video',
+            // Normalize to a single url field
+            url: m.mp4 || m.webm || m.url || "",
+            thumb: m.thumbnail,
+            name: m.name
+        })),
+        ...screenshots.map((url: string) => ({ type: 'image', url }))
+    ], [movies, screenshots]);
+
+    // Always start at the first video if one exists
+    const firstVideoIndex = mediaList.findIndex(m => m.type === 'video');
+    const startIndex = firstVideoIndex !== -1 ? firstVideoIndex : 0;
+
+    // Reset to first video whenever the game changes
+    React.useEffect(() => {
+        setActiveMediaIndex(startIndex);
+    }, [game.id]);
 
     const activeMedia = mediaList[activeMediaIndex];
 
-    const nextMedia = () => {
-        setActiveMediaIndex((prev) => (prev + 1) % mediaList.length);
-    };
+    // Preload first video URL so it loads faster
+    React.useEffect(() => {
+        const firstMedia = mediaList[0];
+        if (firstMedia?.type === 'video' && firstMedia.url) {
+            const link = document.createElement('link');
+            link.rel = 'preload';
+            link.as = 'video';
+            link.href = firstMedia.url;
+            document.head.appendChild(link);
+            return () => { document.head.removeChild(link); };
+        }
+    }, [game.id, mediaList]);
 
-    const prevMedia = () => {
-        setActiveMediaIndex((prev) => (prev - 1 + mediaList.length) % mediaList.length);
-    };
-
+    // Fetch live requirements from Steam API
+    React.useEffect(() => {
+        setReqLoading(true);
+        setRequirements(null);
+        fetchRequirements(game.id).then(data => {
+            setRequirements(data);
+            setReqLoading(false);
+        });
+    }, [game.id]);
     return (
         <div className="relative w-full min-h-screen bg-[#0b0b0f] text-[#d1d1d1] pb-20 font-sans selection:bg-white selection:text-black">
 
             {/* ── CLASSIC HEADER SECTION ── */}
-            <section className="relative h-[40vh] w-full border-b border-white/10 overflow-hidden">
-                <img src={game.banner} alt="" className="absolute inset-0 w-full h-full object-cover opacity-30 blur-[8px]" />
+            <section className="relative h-[55vh] w-full border-b border-white/10 overflow-hidden">
+                <img src={game.banner} alt="" className="absolute inset-0 w-full h-full object-cover opacity-40" />
                 <div className="absolute inset-0 bg-gradient-to-t from-[#0b0b0f] to-transparent" />
 
                 <div className="absolute inset-0 flex flex-col justify-end p-12 lg:px-24">
@@ -84,13 +138,6 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, accentCo
                             {activeMedia.type === 'video' ? (
                                 <video
                                     key={activeMedia.url}
-                                    ref={(el) => {
-                                        if (el) {
-                                            el.play().catch((err) => {
-                                                console.error("Autoplay blocked or video failed to start:", err);
-                                            });
-                                        }
-                                    }}
                                     src={activeMedia.url}
                                     className="w-full h-full object-contain"
                                     autoPlay
@@ -99,13 +146,12 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, accentCo
                                     controls
                                     playsInline
                                     preload="auto"
-                                    poster={activeMedia.thumb}
-                                    onCanPlay={(e) => {
-                                        console.log("Video can play", e.currentTarget.currentSrc);
+                                    onLoadStart={() => {
+                                        setVideoError(null);
                                     }}
                                     onError={(e) => {
-                                        const el = e.currentTarget as HTMLVideoElement;
-                                        console.error("Video error:", el.error);
+                                        const errorMsg = (e.target as any).error?.message || "Unknown video error";
+                                        setVideoError(errorMsg);
                                     }}
                                 />
                             ) : (
@@ -116,42 +162,59 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, accentCo
                                 />
                             )}
 
-                            {/* Navigation Buttons Overlay */}
-                            <button
-                                onClick={prevMedia}
-                                className="absolute left-0 top-0 bottom-0 px-6 bg-gradient-to-r from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-center"
-                            >
-                                <ChevronLeft size={32} />
-                            </button>
-                            <button
-                                onClick={nextMedia}
-                                className="absolute right-0 top-0 bottom-0 px-6 bg-gradient-to-l from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-center"
-                            >
-                                <ChevronRight size={32} />
-                            </button>
+                            {videoError && (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 p-6 text-center">
+                                    <p className="text-red-500 text-sm font-bold mb-2">Playback Error</p>
+                                    <p className="text-white/40 text-[10px] break-all max-w-md">{videoError}</p>
+                                    <p className="text-white/20 text-[8px] mt-4 uppercase tracking-widest">Check console for details</p>
+                                </div>
+                            )}
                         </div>
 
                         {/* Thumbnail Strip with Fade Effect */}
-                        <div className="relative group">
-                            <div className="flex gap-3 overflow-x-auto pb-4 no-scrollbar scroll-smooth">
+                        <div className="relative group flex items-center">
+                            <button
+                                onClick={() => scrollThumbnails('left')}
+                                className="absolute left-0 z-20 h-full px-2 bg-gradient-to-r from-[#0b0b0f] to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-center"
+                            >
+                                <ChevronLeft size={24} />
+                            </button>
+                            <div
+                                ref={thumbnailRef}
+                                className="flex gap-3 overflow-x-auto no-scrollbar scroll-smooth w-full"
+                            >
                                 {mediaList.map((item, i) => (
                                     <div
                                         key={i}
                                         onClick={() => setActiveMediaIndex(i)}
-                                        className={`relative shrink-0 w-32 aspect-video cursor-pointer border-2 transition-all rounded-sm overflow-hidden ${activeMediaIndex === i ? 'border-[#3a9bed] scale-105 z-10' : 'border-white/10 opacity-60 hover:opacity-100'
-                                            }`}
+                                        className={`relative shrink-0 w-32 aspect-video cursor-pointer border-2 transition-all rounded-sm overflow-hidden ${activeMediaIndex === i ? 'border-[#3a9bed] scale-105 z-10' : 'border-white/10 opacity-60 hover:opacity-100'}`}
                                     >
                                         <img src={item.type === 'video' ? item.thumb : item.url} className="w-full h-full object-cover" alt="" />
                                         {item.type === 'video' && (
-                                            <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                                                <Play size={16} fill="white" className="opacity-80" />
-                                            </div>
+                                            <>
+                                                {/* Dark overlay so it's clearly different from a screenshot */}
+                                                <div className="absolute inset-0 bg-black/50" />
+                                                {/* Centered play button */}
+                                                <div className="absolute inset-0 flex items-center justify-center">
+                                                    <div className="bg-white/20 backdrop-blur-sm rounded-full p-2">
+                                                        <Play size={18} fill="white" className="text-white" />
+                                                    </div>
+                                                </div>
+                                                {/* "TRAILER" badge top-left */}
+                                                <div className="absolute top-1 left-1 bg-red-600 text-white text-[7px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-sm">
+                                                    Trailer
+                                                </div>
+                                            </>
                                         )}
                                     </div>
                                 ))}
                             </div>
-                            {/* Right-side Fade Mask */}
-                            <div className="absolute top-0 right-0 bottom-4 w-24 bg-gradient-to-l from-[#0b0b0f] to-transparent pointer-events-none" />
+                            <button
+                                onClick={() => scrollThumbnails('right')}
+                                className="absolute right-0 z-20 h-full px-2 bg-gradient-to-l from-[#0b0b0f] to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-center"
+                            >
+                                <ChevronRight size={24} />
+                            </button>
                         </div>
                     </section>
 
@@ -166,28 +229,33 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, accentCo
                     {/* Requirements */}
                     <section className="space-y-6">
                         <h3 className="text-xs font-black uppercase tracking-[0.3em] text-white/20 border-b border-white/5 pb-2">System Requirements</h3>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-12 pt-4">
-                            <div className="space-y-4">
-                                <h4 className="text-[10px] font-bold uppercase text-white/40 tracking-widest">Minimum</h4>
-                                <ul className="space-y-3 text-xs">
-                                    <RequirementRow label="OS" value="Windows 10 64-bit" />
-                                    <RequirementRow label="Processor" value="Intel Core i5-8400 / AMD Ryzen 5 1600" />
-                                    <RequirementRow label="Memory" value="16 GB RAM" />
-                                    <RequirementRow label="Graphics" value="NVIDIA GTX 1060 / AMD RX 580" />
-                                    <RequirementRow label="Storage" value="130 GB available space" />
-                                </ul>
+                        {reqLoading ? (
+                            <div className="flex items-center gap-3 text-white/30 text-xs pt-4">
+                                <Loader2 size={14} className="animate-spin" />
+                                Fetching requirements from Steam...
                             </div>
-                            <div className="space-y-4">
-                                <h4 className="text-[10px] font-bold uppercase text-white/40 tracking-widest">Recommended</h4>
-                                <ul className="space-y-3 text-xs">
-                                    <RequirementRow label="OS" value="Windows 10/11 64-bit" />
-                                    <RequirementRow label="Processor" value="Intel Core i7-9700 / AMD Ryzen 5 5500" />
-                                    <RequirementRow label="Memory" value="16 GB RAM" />
-                                    <RequirementRow label="Graphics" value="NVIDIA RTX 2060 / AMD RX 5700 XT" />
-                                    <RequirementRow label="Storage" value="130 GB available space" />
-                                </ul>
+                        ) : (!requirements?.minimum && !requirements?.recommended) ? (
+                            <p className="text-xs text-white/20 italic pt-4">System requirements not available for this title.</p>
+                        ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-12 pt-4">
+                                {requirements?.minimum && (
+                                    <div className="space-y-4">
+                                        <h4 className="text-[10px] font-bold uppercase text-white/40 tracking-widest">Minimum</h4>
+                                        <pre className="text-xs text-white/70 font-medium whitespace-pre-wrap leading-relaxed">
+                                            {requirements.minimum}
+                                        </pre>
+                                    </div>
+                                )}
+                                {requirements?.recommended && (
+                                    <div className="space-y-4">
+                                        <h4 className="text-[10px] font-bold uppercase text-white/40 tracking-widest">Recommended</h4>
+                                        <pre className="text-xs text-white/70 font-medium whitespace-pre-wrap leading-relaxed">
+                                            {requirements.recommended}
+                                        </pre>
+                                    </div>
+                                )}
                             </div>
-                        </div>
+                        )}
                     </section>
                 </div>
 
@@ -213,7 +281,7 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, accentCo
                             <span className="text-[10px] font-bold uppercase text-white/30 tracking-widest block">Popular Tags</span>
                             <div className="flex flex-wrap gap-2">
                                 {['Action', 'RPG', 'Souls-like', 'Mythology'].map(tag => (
-                                    <div key={tag} className="bg-white/10 px-2 py-1 rounded-sm text-[10px] text-[#66c0f4] hover:bg-white/20 cursor-pointer">
+                                    <div key={tag} className="bg-white/10 px-2 py-1 rounded-sm text-[10px] text-[#66c0f4]">
                                         {tag}
                                     </div>
                                 ))}
@@ -221,19 +289,9 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, accentCo
                         </div>
                     </div>
 
-                    <div className="flex items-center gap-3 text-white/40">
-                        <ThumbsUp size={14} className="text-green-500" />
-                        <span className="text-[10px] font-black uppercase tracking-widest">Nexus Hub Classic</span>
-                    </div>
                 </div>
             </div>
         </div>
     );
 };
 
-const RequirementRow = ({ label, value }: { label: string, value: string }) => (
-    <li>
-        <span className="text-white/30 font-bold uppercase mr-2">{label}:</span>
-        <span className="text-white/70 font-medium">{value}</span>
-    </li>
-);

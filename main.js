@@ -40,6 +40,24 @@ function createWindow() {
   win.on('maximize', () => win.webContents.send('window-state', true));
   win.on('unmaximize', () => win.webContents.send('window-state', false));
 
+  ipcMain.handle('fetch-steam-data', async (event, url) => {
+    try {
+      const { net } = require('electron');
+      const response = await net.fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 Chrome/120 Safari/537.36',
+          'Referer': 'https://store.steampowered.com/'
+        }
+      });
+      
+      if (!response.ok) return null;
+      return await response.json();
+    } catch (error) {
+      console.error('Failed to fetch Steam data:', error);
+      return null;
+    }
+  });
+
   ipcMain.on('window-control', (event, action) => {
     switch (action) {
       case 'minimize':
@@ -64,9 +82,22 @@ function createWindow() {
 
 app.whenReady().then(() => {
   session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['*://*.steampowered.com/*', '*://*.steamstatic.com/*'] },
     (details, callback) => {
       details.requestHeaders["User-Agent"] = "Mozilla/5.0 Chrome/120 Safari/537.36";
+      details.requestHeaders["Referer"] = "https://store.steampowered.com/";
       callback({ requestHeaders: details.requestHeaders });
+    }
+  );
+
+  session.defaultSession.webRequest.onHeadersReceived(
+    { urls: ['*://*.steampowered.com/*', '*://*.steamstatic.com/*'] },
+    (details, callback) => {
+      if (details.responseHeaders) {
+        details.responseHeaders['Access-Control-Allow-Origin'] = ['*'];
+        details.responseHeaders['Access-Control-Allow-Methods'] = ['GET, OPTIONS'];
+      }
+      callback({ responseHeaders: details.responseHeaders });
     }
   );
 
